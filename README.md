@@ -7,7 +7,7 @@
 
   [![Zepp OS](https://img.shields.io/badge/Zepp_OS-4.0-111111?style=flat-square)](https://docs.zepp.com/)
   [![Device](https://img.shields.io/badge/Amazfit-Bip_6-1ED760?style=flat-square)](#compatibility)
-  [![Version](https://img.shields.io/badge/version-1.6.0-1ED760?style=flat-square)](package.json)
+  [![Version](https://img.shields.io/badge/version-1.7.0-1ED760?style=flat-square)](package.json)
   [![License](https://img.shields.io/badge/license-ISC-555555?style=flat-square)](package.json)
 </div>
 
@@ -124,7 +124,7 @@ Network and Bluetooth latency still affect command completion and new artwork. T
 ## Development notes
 
 - App ID: `26263`
-- App version: `1.6.0` (build code `11`)
+- App version: `1.7.0` (build code `12`)
 - Design width: `390`
 - Target profile: `gt.s`
 - Runtime API: Zepp OS `4.0`
