@@ -1,27 +1,19 @@
 import * as hmUI from '@zos/ui'
 import { px } from '@zos/utils'
-import { back } from '@zos/router'
+import { back, push } from '@zos/router'
 import { BasePage } from '@zeppos/zml/base-page'
+import { cachedArtwork, observeArtwork } from '../../../utils/artwork'
 import {
   BG_STYLE,
   ERROR_STYLE,
   HEADER_STYLE,
   LIST_STYLE,
   STATUS_STYLE,
+  PREVIOUS_PAGE_STYLE,
+  NEXT_PAGE_STYLE,
 } from 'zosLoader:./index.page.[pf].layout.js'
 
-const THUMBNAIL_LIMIT = 6
 const PLACEHOLDER = 'image/art_placeholder.png'
-
-function parseFileParams(params) {
-  if (params && typeof params === 'object') return params
-  if (typeof params !== 'string') return {}
-  try {
-    return JSON.parse(params) || {}
-  } catch (error) {
-    return {}
-  }
-}
 
 Page(
   BasePage({
@@ -32,7 +24,17 @@ Page(
       this.state.busy = false
       this.state.items = []
       this._generation = Number(this._generation || 0) + 1
-      this._thumbnailAlbums = {}
+      this._active = true
+      this._loadSequence = 0
+      this._offset = 0
+      this._nextOffset = null
+      this._total = 0
+      this._loading = false
+      this._thumbnailActive = 0
+      this._thumbnailPending = {}
+      this._thumbnailAttempts = {}
+      this._thumbnailDone = {}
+      this._focus = 0
       this.listWidget = null
     },
 
@@ -43,6 +45,18 @@ Page(
       this.statusWidget = hmUI.createWidget(hmUI.widget.TEXT, {
         ...STATUS_STYLE,
         text: 'Loading liked songs...',
+      })
+      this.statusWidget.addEventListener(hmUI.event.CLICK_DOWN, () => this.retryImages())
+      this.previousPageWidget = hmUI.createWidget(hmUI.widget.BUTTON, {
+        ...PREVIOUS_PAGE_STYLE,
+        click_func: () => { if (this._offset > 0) this.load(Math.max(0, this._offset - 30)) },
+      })
+      this.nextPageWidget = hmUI.createWidget(hmUI.widget.BUTTON, {
+        ...NEXT_PAGE_STYLE,
+        click_func: () => {
+          if (this._loadError) this.load(this._failedOffset)
+          else if (this._nextOffset !== null) this.load(this._nextOffset)
+        },
       })
 
       if (typeof this.request !== 'function') {
@@ -66,57 +80,68 @@ Page(
     },
 
     onReceivedFile(file) {
-      if (!file) return
       const generation = this._generation
-
-      const applyThumbnail = () => {
-        if (!this.state.alive || generation !== this._generation || !file.filePath) return
-        const params = parseFileParams(file.params)
-        if (params.kind !== 'spotify-track-cover' || !params.albumId) return
-
+      observeArtwork(file, (entry) => {
+        if (!this.state.alive || generation !== this._generation || entry.quality !== 'preview') return
         this.state.items.forEach((item, index) => {
-          if (item.albumId !== params.albumId) return
-          item.coverPath = file.filePath
-          this.updateListItem(index)
+          if (item.coverPath === entry.path && item.albumId !== entry.albumId) {
+            item.coverPath = PLACEHOLDER
+            delete this._thumbnailDone[item.albumId]
+            delete this._thumbnailAttempts[item.albumId]
+            this.updateListItem(index)
+          }
+          if (item.albumId === entry.albumId) {
+            item.coverPath = entry.path
+            this._thumbnailDone[item.albumId] = true
+            this.updateListItem(index)
+          }
         })
-      }
-
-      try {
-        if (file.readyState === 'transferred') {
-          applyThumbnail()
-          return
-        }
-        file.on('change', (event) => {
-          if (event && event.data && event.data.readyState === 'transferred') applyThumbnail()
-        })
-      } catch (error) {}
+        this.updateImageStatus()
+      })
     },
 
-    load() {
+    load(offset = 0) {
+      if (!this.state.alive || this.state.busy || this._loading) return
       const generation = this._generation
-      this.request({ method: 'spotify.getTracks', params: {} })
+      const sequence = ++this._loadSequence
+      this._loading = true
+      this._loadError = false
+      this._thumbnailActive = 0
+      this._thumbnailPending = {}
+      this.setStatus('Loading liked songs…', false)
+      this.request({ method: 'spotify.getTracks', params: { offset } })
         .then((response) => {
-          if (!this.state.alive || generation !== this._generation) return
+          if (!this.state.alive || generation !== this._generation || sequence !== this._loadSequence) return
+          this._loading = false
           if (!response || response.success === false) {
-            this.setStatus((response && response.error) || 'Could not load songs', true)
-            return
+            throw new Error((response && response.error) || 'Could not load songs')
           }
-
           const items = (response.items || []).map((item) => ({
             ...item,
-            coverPath: PLACEHOLDER,
+            coverPath: (cachedArtwork(item.albumId, 'preview') || {}).path || PLACEHOLDER,
           }))
-          if (!items.length) {
-            this.setStatus('No liked songs found', false)
-            return
-          }
+          this._offset = offset
+          this._nextOffset = response.nextOffset === undefined ? null : response.nextOffset
+          this._total = response.total || items.length
+          this._thumbnailActive = 0
+          this._thumbnailPending = {}
+          this._thumbnailAttempts = {}
+          this._thumbnailDone = {}
+          this._focus = 0
           this.state.items = items
-          this.setStatus(`${items.length} songs · ${Math.min(THUMBNAIL_LIMIT, items.length)} light previews`, false)
+          this.previousPageWidget.setProperty(hmUI.prop.MORE, { ...PREVIOUS_PAGE_STYLE, text: offset ? 'Previous' : 'First page' })
+          this.nextPageWidget.setProperty(hmUI.prop.MORE, { ...NEXT_PAGE_STYLE, text: this._nextOffset === null ? 'Last page' : 'Next songs' })
           this.renderList(items)
-          this.loadThumbnail(0)
+          this.updateImageStatus()
+          this.pumpThumbnails()
         })
         .catch((error) => {
-          if (this.state.alive && generation === this._generation) this.setStatus(error.message || error, true)
+          if (!this.state.alive || generation !== this._generation || sequence !== this._loadSequence) return
+          this._loading = false
+          this._loadError = true
+          this._failedOffset = offset
+          this.setStatus(error.message || error, false)
+          this.nextPageWidget.setProperty(hmUI.prop.MORE, { ...NEXT_PAGE_STYLE, text: 'Retry loading' })
         })
     },
 
@@ -125,6 +150,7 @@ Page(
         cover: item.coverPath || PLACEHOLDER,
         name: String(item.name || 'Unknown track').substring(0, 36),
         subtitle: String(item.subtitle || 'Unknown artist').substring(0, 40),
+        radio: 'Radio',
       }
     },
 
@@ -138,28 +164,61 @@ Page(
       } catch (error) {}
     },
 
-    loadThumbnail(index) {
-      const maximum = Math.min(THUMBNAIL_LIMIT, this.state.items.length)
-      if (!this.state.alive || index >= maximum) return
-      const item = this.state.items[index]
-      const generation = this._generation
+    updateImageStatus() {
+      if (this.state.busy || this._loading || this._loadError) return
+      const items = this.state.items
+      if (!items.length) { this.setStatus('No liked songs found', false); return }
+      const withArt = items.filter((item) => item.artUrl)
+      const loaded = withArt.filter((item) => item.coverPath !== PLACEHOLDER).length
+      this.setStatus(`${this._offset + 1}–${this._offset + items.length}/${this._total} · ${loaded}/${withArt.length} covers${loaded < withArt.length ? ' · Tap to retry' : ''}`, false)
+    },
 
-      const next = () => {
-        if (this.state.alive && generation === this._generation) this.loadThumbnail(index + 1)
-      }
-      if (!item || !item.albumId || !item.artUrl || this._thumbnailAlbums[item.albumId]) {
-        next()
-        return
-      }
+    retryImages() {
+      if (this.state.busy || this._loading) return
+      this._thumbnailAttempts = {}
+      this._thumbnailDone = {}
+      this.pumpThumbnails()
+    },
 
-      this._thumbnailAlbums[item.albumId] = true
-      this.request({
-        method: 'spotify.getTrackArt',
-        params: { url: item.artUrl, albumId: item.albumId, slot: index },
-      }).then(next).catch(next)
+    pumpThumbnails() {
+      if (!this.state.alive || !this._active || this.state.busy || this._loading) return
+      const sequence = this._loadSequence
+      const order = this.state.items.map((item, index) => index).sort((a, b) => Math.abs(a - this._focus) - Math.abs(b - this._focus))
+      while (this._thumbnailActive < 2) {
+        const index = order.find((i) => {
+          const item = this.state.items[i]
+          return item.albumId && item.artUrl && item.coverPath === PLACEHOLDER && !this._thumbnailPending[item.albumId]
+            && !this._thumbnailDone[item.albumId] && (this._thumbnailAttempts[item.albumId] || 0) < 2
+        })
+        if (index === undefined) break
+        const item = this.state.items[index]
+        const cached = cachedArtwork(item.albumId, 'preview')
+        if (cached) {
+          this.state.items.forEach((candidate, row) => {
+            if (candidate.albumId === item.albumId) { candidate.coverPath = cached.path; this.updateListItem(row) }
+          })
+          continue
+        }
+        this._thumbnailActive += 1
+        this._thumbnailPending[item.albumId] = true
+        this._thumbnailAttempts[item.albumId] = (this._thumbnailAttempts[item.albumId] || 0) + 1
+        this.request({ method: 'spotify.getTrackArt', params: { url: item.artUrl, albumId: item.albumId, slot: index } })
+          .then((response) => {
+            if (sequence === this._loadSequence && response && response.success !== false && response.transferred !== false) this._thumbnailDone[item.albumId] = true
+          }).catch(() => {}).finally(() => {
+            if (!this.state.alive || sequence !== this._loadSequence) return
+            this._thumbnailActive -= 1
+            delete this._thumbnailPending[item.albumId]
+            this.updateImageStatus()
+            this.pumpThumbnails()
+          })
+      }
     },
 
     renderList(items) {
+      if (this.listWidget) hmUI.deleteWidget(this.listWidget)
+      this.listWidget = null
+      if (!items.length) return
       const data = items.map((item) => this.listItem(item))
 
       this.listWidget = hmUI.createWidget(hmUI.widget.SCROLL_LIST, {
@@ -174,7 +233,7 @@ Page(
             {
               x: px(70),
               y: px(7),
-              w: LIST_STYLE.w - px(84),
+              w: LIST_STYLE.w - px(156),
               h: px(29),
               key: 'name',
               color: 0xffffff,
@@ -184,15 +243,16 @@ Page(
             {
               x: px(70),
               y: px(38),
-              w: LIST_STYLE.w - px(84),
+              w: LIST_STYLE.w - px(156),
               h: px(22),
               key: 'subtitle',
               color: 0x8f8f8f,
               text_size: px(13),
               action: true,
             },
+            { x: LIST_STYLE.w - px(74), y: px(15), w: px(66), h: px(40), key: 'radio', color: 0x1ed760, text_size: px(16), action: true },
           ],
-          text_view_count: 2,
+          text_view_count: 3,
           image_view: [{
             x: px(8),
             y: px(8),
@@ -209,7 +269,14 @@ Page(
         data_type_config: [{ start: 0, end: data.length - 1, type_id: 1 }],
         data_type_config_count: 1,
         enable_scroll_bar: true,
-        item_click_func: (list, index) => this.playTrack(index),
+        item_focus_change_func: (list, index, focus) => {
+          if (focus) { this._focus = index; this.pumpThumbnails() }
+        },
+        item_click_func: (list, index, key) => {
+          const item = this.state.items[index]
+          if (key === 'radio' && item && !this.state.busy) push({ url: 'page/gt/radio/index.page', params: { uri: item.uri, name: item.name } })
+          else if (key !== 'radio') this.playTrack(index)
+        },
       })
     },
 
@@ -227,6 +294,7 @@ Page(
           if (!response || response.success === false) {
             this.state.busy = false
             this.setStatus((response && response.error) || 'Could not play song', true)
+            this.pumpThumbnails()
             return
           }
           back()
@@ -235,11 +303,17 @@ Page(
           if (!this.state.alive || generation !== this._generation) return
           this.state.busy = false
           this.setStatus(error.message || error, true)
+          this.pumpThumbnails()
         })
     },
 
+    onPause() { this._active = false },
+
+    onResume() { this._active = true; this.retryImages() },
+
     onDestroy() {
       this.state.alive = false
+      this._loadSequence += 1
       this._generation = Number(this._generation || 0) + 1
     },
   }),

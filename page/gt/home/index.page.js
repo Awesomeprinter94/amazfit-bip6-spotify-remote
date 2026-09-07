@@ -2,6 +2,7 @@ import * as hmUI from '@zos/ui'
 import { log as Logger } from '@zos/utils'
 import { launchApp, push, SYSTEM_APP_MUSIC } from '@zos/router'
 import { BasePage } from '@zeppos/zml/base-page'
+import { cachedArtwork, knownArtworkAlbums, observeArtwork } from '../../../utils/artwork'
 import {
   BG_STYLE,
   CONTENT_STYLE,
@@ -27,6 +28,7 @@ import {
   NAV_SEARCH_STYLE,
   NAV_QUEUE_STYLE,
   NAV_VOLUME_STYLE,
+  NAV_RADIO_STYLE,
 } from 'zosLoader:./index.page.[pf].layout.js'
 
 const logger = Logger.getLogger('spotify-home')
@@ -56,6 +58,20 @@ function isLikeableTrack(uri) {
   return /^spotify:track:[A-Za-z0-9]+$/.test(String(uri || ''))
 }
 
+function selectImage(images, size) {
+  let selected = null
+  let distance = Number.POSITIVE_INFINITY
+  images.forEach((image) => {
+    if (!image || !image.url) return
+    const candidate = image.width ? Math.abs(image.width - size) : 10000
+    if (candidate < distance) {
+      selected = image
+      distance = candidate
+    }
+  })
+  return selected
+}
+
 Page(
   BasePage({
     state: {
@@ -69,7 +85,6 @@ Page(
       likeKnown: false,
       likeBusy: false,
       wantedAlbum: '',
-      requestedAlbum: '',
       displayedAlbum: '',
     },
 
@@ -82,13 +97,28 @@ Page(
       this.state.liked = false
       this.state.likeKnown = false
       this.state.likeBusy = false
+      this.state.isPlaying = false
       this.state.wantedAlbum = ''
-      this.state.requestedAlbum = ''
       this.state.displayedAlbum = ''
       this._generation = Number(this._generation || 0) + 1
       this._requestSequence = 0
       this._likeSequence = 0
       this._refreshTimer = null
+      this._autoArt = null
+      this._progressTimer = null
+      this._active = true
+      this._refreshing = false
+      this._refreshPending = false
+      this._controlQueue = []
+      this._confirmedPlaying = false
+      this._progressMs = 0
+      this._durationMs = 0
+      this._progressAt = Date.now()
+      this._expectedState = null
+      this._currentItem = null
+      this._artistText = ''
+      this._coverRequests = {}
+      this._coverQuality = ''
       this._coverPath = 'image/art_placeholder.png'
       this._pendingCovers = {}
     },
@@ -160,6 +190,10 @@ Page(
           ...NAV_VOLUME_STYLE,
           click_func: () => this.openPhoneVolume(),
         })
+        createWidget(hmUI.widget.BUTTON, {
+          ...NAV_RADIO_STYLE,
+          click_func: () => this.openRadio(),
+        })
 
         this.state.built = true
         if (typeof this.request !== 'function') {
@@ -185,40 +219,37 @@ Page(
     },
 
     onResume() {
-      if (this.state.built && this.state.loaded && !this.state.busy) {
+      this._active = true
+      this.startProgressClock()
+      if (this.state.built && !this.state.busy) {
         this.refresh(true)
       }
     },
 
+    onPause() {
+      this._active = false
+      this.clearTimers()
+    },
+
     onReceivedFile(file) {
-      if (!file) return
       const generation = this._generation
-
-      const applyCover = () => {
-        if (!this.state.alive || generation !== this._generation || !this.artWidget || !file.filePath) return
-        const params = parseFileParams(file.params)
-        if (params.kind && params.kind !== 'spotify-cover') return
-        const albumId = params.albumId || ''
-        if (albumId && albumId !== this.state.wantedAlbum) {
-          this._pendingCovers[albumId] = file.filePath
-          return
+      observeArtwork(file, (entry) => {
+        if (!this.state.alive || generation !== this._generation || !this.artWidget) return
+        if (this._coverPath === entry.path && this.state.displayedAlbum !== entry.albumId) {
+          this.state.displayedAlbum = ''
+          this.showPlaceholder()
+          this.requestCover(this._currentItem)
         }
-        this.applyCover(file.filePath, albumId)
-      }
+        if (entry.albumId !== this.state.wantedAlbum) return
+        this._autoArt = null
+        if (entry.quality === 'preview' && this._coverQuality === 'full') return
+        this.applyCover(entry.path, entry.albumId, entry.quality)
+      })
+    },
 
-      try {
-        if (file.readyState === 'transferred') {
-          applyCover()
-          return
-        }
-        file.on('change', (event) => {
-          if (event && event.data && event.data.readyState === 'transferred') {
-            applyCover()
-          }
-        })
-      } catch (error) {
-        logger.error('cover receive failed ' + errorMessage(error))
-      }
+    onCall(message) {
+      if (message && message.method === 'spotify.artFailed' && this._autoArt
+        && message.params && message.params.albumId === this._autoArt.albumId) this._autoArt = null
     },
 
     applyCover(path, albumId) {
@@ -258,13 +289,35 @@ Page(
       this.durationWidget.setProperty(hmUI.prop.TEXT, formatTime(duration))
     },
 
+    currentProgress() {
+      const elapsed = this.state.isPlaying ? Date.now() - (this._progressAt || Date.now()) : 0
+      return Math.min(this._durationMs || 0, Math.max(0, (this._progressMs || 0) + elapsed))
+    },
+
+    startProgressClock() {
+      if (this._progressTimer || !this._active || !this.state.alive || !this.state.isPlaying) return
+      this._progressTimer = setTimeout(() => {
+        this._progressTimer = null
+        if (!this._active || !this.state.alive) return
+        this.setProgress(this.currentProgress(), this._durationMs)
+        this.startProgressClock()
+      }, 1000)
+    },
+
     setPlaying(isPlaying) {
+      this._progressMs = this.currentProgress()
+      this._progressAt = Date.now()
       this.state.isPlaying = !!isPlaying
       if (!this.state.alive || !this.playIcon) return
       this.playIcon.setProperty(
         hmUI.prop.SRC,
         this.state.isPlaying ? 'image/icon_pause.png' : 'image/icon_play.png',
       )
+      if (!this.state.isPlaying && this._progressTimer) {
+        clearTimeout(this._progressTimer)
+        this._progressTimer = null
+      }
+      this.startProgressClock()
     },
 
     updateLikeButton() {
@@ -391,20 +444,48 @@ Page(
       this.requestLikeState('')
     },
 
+    refreshFailed(error) {
+      this._expectedState = null
+      if (this.state.loaded) {
+        this.artistWidget.setProperty(hmUI.prop.TEXT, errorMessage(error).substring(0, 90))
+      } else {
+        this.showError(error)
+      }
+    },
+
     showPlaceholder() {
       this._coverPath = 'image/art_placeholder.png'
+      this._coverQuality = ''
       if (!this.artWidget) return
       try {
         this.artWidget.setProperty(hmUI.prop.MORE, ART_STYLE)
       } catch (error) {}
     },
 
+    applyCover(path, albumId, quality) {
+      try {
+        this.artWidget.setProperty(hmUI.prop.MORE, { ...ART_STYLE, src: path })
+        this._coverPath = path
+        this._coverQuality = quality
+        this.state.displayedAlbum = albumId
+      } catch (error) {
+        logger.error('cover display failed ' + errorMessage(error))
+      }
+    },
+
     openCover() {
       if (!this.state.alive) return
       try {
+        const album = this._currentItem && this._currentItem.album
+        const full = selectImage((album && album.images) || [], 300)
         push({
           url: 'page/gt/cover/index.page',
-          params: { src: this._coverPath || 'image/art_placeholder.png' },
+          params: {
+            src: this._coverPath || 'image/art_placeholder.png',
+            albumId: this.state.wantedAlbum,
+            url: (full && full.url) || '',
+            quality: this._coverQuality,
+          },
         })
       } catch (error) {
         logger.error('cover page failed ' + errorMessage(error))
@@ -426,87 +507,113 @@ Page(
       }
     },
 
+    openRadio() {
+      const item = this._currentItem
+      if (!item || !item.uri) {
+        this.artistWidget.setProperty(hmUI.prop.TEXT, 'Play a song first to start its radio')
+        return
+      }
+      push({ url: 'page/gt/radio/index.page', params: { uri: item.uri, name: item.name } })
+    },
+
     requestCover(item) {
       const album = item && item.album
       const albumId = (album && album.id) || ''
       const images = (album && album.images) || []
       if (!albumId || !images.length) {
         this.state.wantedAlbum = ''
-        this.state.requestedAlbum = ''
         this.state.displayedAlbum = ''
         this.showPlaceholder()
         return
       }
 
-      let image = images[0]
-      let bestDistance = Number.POSITIVE_INFINITY
-      for (let index = 0; index < images.length; index += 1) {
-        const candidate = images[index]
-        if (!candidate || !candidate.url) continue
-        const width = Number(candidate.width || 0)
-        const distance = width > 0 ? Math.abs(width - 300) : 10000
-        if (distance < bestDistance) {
-          image = candidate
-          bestDistance = distance
-        }
-      }
-      if (!image || !image.url) return
-
+      const preview = selectImage(images, 64)
+      if (!preview) return
       this.state.wantedAlbum = albumId
-      if (albumId === this.state.displayedAlbum) return
-
-      const pendingPath = this._pendingCovers[albumId]
-      if (pendingPath && this.applyCover(pendingPath, albumId)) {
-        this.state.requestedAlbum = albumId
-        return
+      if (this.state.displayedAlbum !== albumId) {
+        this.state.displayedAlbum = ''
+        this.showPlaceholder()
       }
-      if (albumId === this.state.requestedAlbum) return
+      const cached = cachedArtwork(albumId)
+      if (cached && (this.state.displayedAlbum !== albumId || this._coverQuality !== 'full')) {
+        this.applyCover(cached.path, albumId, cached.quality)
+      }
+      if (this.state.displayedAlbum === albumId) return
+      if (!this._active || this.state.busy) return
+      if (this._autoArt && this._autoArt.albumId === albumId && Date.now() - this._autoArt.startedAt < 10000) return
+      this.fetchCover(preview, albumId, Number(preview.width) > 128 ? 'full' : 'preview')
+    },
 
-      this.state.requestedAlbum = albumId
-      this.state.displayedAlbum = ''
-      this.showPlaceholder()
-
+    fetchCover(image, albumId, quality) {
+      const key = `${albumId}:${quality}`
+      if (this._coverRequests[key]) return this._coverRequests[key]
       const generation = this._generation
-      this.request({
+      const request = this.request({
         method: 'spotify.getArt',
-        params: { url: image.url, albumId },
+        params: { url: image.url, albumId, quality },
       }).then((response) => {
-        if (!this.state.alive || generation !== this._generation || this.state.wantedAlbum !== albumId) return
         if (!response || response.success === false) {
-          this.state.requestedAlbum = ''
           logger.error('cover request failed ' + errorMessage(response && response.error))
         }
       }).catch((error) => {
-        if (generation === this._generation && this.state.wantedAlbum === albumId) this.state.requestedAlbum = ''
         logger.error('cover request failed ' + errorMessage(error))
+      }).finally(() => {
+        if (generation === this._generation) delete this._coverRequests[key]
       })
+      this._coverRequests[key] = request
+      return request
     },
 
     refresh(silent) {
-      if (!this.state.alive || !this.state.built || typeof this.request !== 'function') return
+      if (!this.state.alive || !this._active || !this.state.built || typeof this.request !== 'function' || this.state.busy) return
+      if (this._refreshing) {
+        this._refreshPending = true
+        return
+      }
+      if (this._refreshTimer) clearTimeout(this._refreshTimer)
+      this._refreshTimer = null
+      this._refreshing = true
       const generation = this._generation
       const sequence = ++this._requestSequence
       if (!silent && !this.state.loaded) {
         this.artistWidget.setProperty(hmUI.prop.TEXT, 'Connecting to your phone...')
       }
 
-      this.request({ method: 'spotify.getState', params: {} })
+      return this.request({ method: 'spotify.getState', params: { art: true, knownAlbums: knownArtworkAlbums() } })
         .then((response) => {
           if (!this.state.alive || generation !== this._generation || sequence !== this._requestSequence) return
           if (!response || response.success === false) {
-            this.showError((response && response.error) || 'No response from phone')
+            this.refreshFailed((response && response.error) || 'No response from phone')
             return
           }
 
           const data = response.data || {}
           const item = data.item
+          if (response.art && (!this._autoArt || this._autoArt.albumId !== response.art.albumId)) {
+            this._autoArt = { ...response.art, startedAt: Date.now() }
+          }
+          const expected = this._expectedState
+          if (expected) {
+            const stale = expected.action === 'next'
+              ? item && item.id === expected.trackId
+              : expected.isPlaying !== undefined && !!data.is_playing !== expected.isPlaying
+            if (stale && expected.attempts < 3) {
+              expected.attempts += 1
+              return
+            }
+            this._expectedState = null
+          }
           this.state.loaded = true
+          this._currentItem = item || null
+          this._confirmedPlaying = !!data.is_playing
           if (!item) {
             this.titleWidget.setProperty(hmUI.prop.TEXT, 'Nothing playing')
             this.artistWidget.setProperty(hmUI.prop.TEXT, 'Start Spotify on your phone')
             this.setProgress(0, 0)
             this.setPlaying(false)
             this.requestLikeState('')
+            this._progressMs = 0
+            this._durationMs = 0
             this.requestCover(null)
             return
           }
@@ -517,63 +624,114 @@ Page(
           const deviceName = data.device && data.device.name ? `  ·  ${data.device.name}` : ''
 
           this.titleWidget.setProperty(hmUI.prop.TEXT, item.name || 'Unknown track')
-          this.artistWidget.setProperty(hmUI.prop.TEXT, `${artists}${deviceName}`)
+          this._artistText = `${artists}${deviceName}`
+          this.artistWidget.setProperty(hmUI.prop.TEXT, this._artistText)
           this.setPlaying(!!data.is_playing)
+          this._progressMs = Number(data.progress_ms || 0)
+          this._durationMs = Number(item.duration_ms || 0)
+          this._progressAt = Date.now()
           this.setProgress(data.progress_ms, item.duration_ms)
           this.requestLikeState(item.uri)
           this.requestCover(item)
         })
         .catch((error) => {
           if (!this.state.alive || generation !== this._generation || sequence !== this._requestSequence) return
-          this.showError(error)
+          this.refreshFailed(error)
+        })
+        .finally(() => {
+          if (!this.state.alive || generation !== this._generation) return
+          this._refreshing = false
+          if (!this._active || this.state.busy) return
+          if (this._refreshPending) {
+            this._refreshPending = false
+            this.refresh(true)
+            return
+          }
+          const delay = this._expectedState ? 250 * this._expectedState.attempts : this.state.isPlaying ? 5000 : 15000
+          this._refreshTimer = setTimeout(() => {
+            this._refreshTimer = null
+            this.refresh(true)
+          }, delay)
         })
     },
 
     handleControl(action) {
-      if (!this.state.alive || this.state.busy) return
-      const generation = this._generation
-      this.state.busy = true
-      this.updateLikeButton()
-
-      if (action === 'previous' || action === 'next') this.requestLikeState('')
-
+      if (!this.state.alive || this._controlQueue.length >= 8) return
+      const wasPlaying = this.state.isPlaying
+      const command = action === 'toggle' && this.state.loaded ? wasPlaying ? 'pause' : 'play' : action
+      if (action === 'toggle' && this.state.loaded) this.setPlaying(!wasPlaying)
+      this._requestSequence += 1
+      this._expectedState = null
+      if (this._refreshTimer) clearTimeout(this._refreshTimer)
+      this._refreshTimer = null
+      this._autoArt = null
       const pending = action === 'previous'
         ? 'Going back...'
         : action === 'next'
           ? 'Skipping...'
-          : this.state.isPlaying
+          : wasPlaying
             ? 'Pausing...'
             : 'Playing...'
       this.artistWidget.setProperty(hmUI.prop.TEXT, pending)
+      this._controlQueue.push(command)
+      if (!this.state.busy) this.sendNextControl()
+    },
 
+    sendNextControl() {
+      if (!this.state.alive || !this._controlQueue.length) return
+      const action = this._controlQueue.shift()
+      const generation = this._generation
+      this.state.busy = true
       this.request({ method: `spotify.${action}`, params: {} })
         .then((response) => {
           if (!this.state.alive || generation !== this._generation) return
           if (!response || response.success === false) {
-            this.state.busy = false
             this.updateLikeButton()
-            this.showError((response && response.error) || 'Command failed')
+            this.controlFailed((response && response.error) || 'Command failed')
             return
           }
-
-          if (action === 'toggle' && response.isPlaying !== undefined) {
-            this.setPlaying(response.isPlaying)
+          if (response.isPlaying !== undefined) this._confirmedPlaying = response.isPlaying
+          if (this._controlQueue.length) {
+            this.sendNextControl()
+            return
           }
-          this.artistWidget.setProperty(hmUI.prop.TEXT, 'Done')
-          this._refreshTimer = setTimeout(() => {
-            this._refreshTimer = null
-            if (!this.state.alive || generation !== this._generation) return
-            this.state.busy = false
-            this.updateLikeButton()
-            this.refresh(true)
-          }, 700)
+          if (response.isPlaying !== undefined) this.setPlaying(response.isPlaying)
+          this.state.busy = false
+          this.updateLikeButton()
+          this._expectedState = {
+            action, trackId: this._currentItem && this._currentItem.id,
+            isPlaying: response.isPlaying, attempts: 0,
+          }
+          this.artistWidget.setProperty(hmUI.prop.TEXT, this._artistText)
+          this.refresh(true)
         })
         .catch((error) => {
           if (!this.state.alive || generation !== this._generation) return
-          this.state.busy = false
           this.updateLikeButton()
-          this.showError(error)
+          this.controlFailed(error)
         })
+    },
+
+    controlFailed(error) {
+      this._controlQueue = []
+      this.state.busy = false
+      this._expectedState = null
+      this.setPlaying(this._confirmedPlaying)
+      this.artistWidget.setProperty(hmUI.prop.TEXT, errorMessage(error).substring(0, 90))
+      // A lost acknowledgement may still have reached Spotify. Reconcile once.
+      if (this._active) {
+        this._refreshTimer = setTimeout(() => {
+          this._refreshTimer = null
+          this.refresh(true)
+        }, 1500)
+      }
+    },
+
+    clearTimers() {
+      ;['_refreshTimer', '_progressTimer'].forEach((key) => {
+        if (this[key]) clearTimeout(this[key])
+        this[key] = null
+      })
     },
 
     onDestroy() {
@@ -582,10 +740,8 @@ Page(
       this._requestSequence += 1
       this._likeSequence += 1
       this._pendingCovers = {}
-      if (this._refreshTimer) {
-        clearTimeout(this._refreshTimer)
-        this._refreshTimer = null
-      }
+      this._controlQueue = []
+      this.clearTimers()
     },
   }),
 )

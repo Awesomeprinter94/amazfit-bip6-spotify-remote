@@ -247,7 +247,7 @@ export const NAV_SEARCH_STYLE = {
 }
 
 const SECOND_NAV_GAP = px(8)
-const SECOND_NAV_W = Math.floor((W - NAV_MARGIN * 2 - SECOND_NAV_GAP) / 2)
+const SECOND_NAV_W = Math.floor((W - NAV_MARGIN * 2 - SECOND_NAV_GAP * 2) / 3)
 const SECOND_NAV_Y = NAV_Y + px(51)
 
 const SECOND_NAV_BASE = {
@@ -266,4 +266,10 @@ export const NAV_VOLUME_STYLE = {
   ...SECOND_NAV_BASE,
   text: 'Volume',
   x: NAV_MARGIN + SECOND_NAV_W + SECOND_NAV_GAP,
+}
+
+export const NAV_RADIO_STYLE = {
+  ...SECOND_NAV_BASE,
+  text: 'Radio',
+  x: NAV_MARGIN + (SECOND_NAV_W + SECOND_NAV_GAP) * 2,
 }

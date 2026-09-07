@@ -1,6 +1,6 @@
 import * as hmUI from '@zos/ui'
 import { px } from '@zos/utils'
-import { back } from '@zos/router'
+import { back, push } from '@zos/router'
 import { BasePage } from '@zeppos/zml/base-page'
 import {
   BG_STYLE,
@@ -144,6 +144,7 @@ Page(
       const data = items.map((item) => ({
         name: String(item.name || 'Unknown track').substring(0, 40),
         subtitle: String(item.subtitle || 'Unknown artist').substring(0, 44),
+        radio: 'Radio',
       }))
 
       this.listWidget = hmUI.createWidget(hmUI.widget.SCROLL_LIST, {
@@ -158,7 +159,7 @@ Page(
             {
               x: px(14),
               y: px(7),
-              w: LIST_STYLE.w - px(28),
+              w: LIST_STYLE.w - px(98),
               h: px(29),
               key: 'name',
               color: 0xffffff,
@@ -168,21 +169,26 @@ Page(
             {
               x: px(14),
               y: px(37),
-              w: LIST_STYLE.w - px(28),
+              w: LIST_STYLE.w - px(98),
               h: px(22),
               key: 'subtitle',
               color: 0x8f8f8f,
               text_size: px(13),
               action: true,
             },
+            { x: LIST_STYLE.w - px(76), y: px(14), w: px(68), h: px(40), key: 'radio', color: 0x1ed760, text_size: px(16), action: true },
           ],
-          text_view_count: 2,
+          text_view_count: 3,
         }],
         item_config_count: 1,
         data_array: data,
         data_count: data.length,
         enable_scroll_bar: true,
-        item_click_func: (list, index) => this.playTrack(index),
+        item_click_func: (list, index, key) => {
+          const item = this.state.items[index]
+          if (key === 'radio' && item && !this.state.busy) push({ url: 'page/gt/radio/index.page', params: { uri: item.uri, name: item.name } })
+          else if (key !== 'radio') this.playTrack(index)
+        },
       })
     },
 

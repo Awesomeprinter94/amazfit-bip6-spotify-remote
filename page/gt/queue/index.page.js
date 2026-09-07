@@ -45,7 +45,6 @@ Page(
       this.state.current = null
       this.state.items = []
       this._generation = Number(this._generation || 0) + 1
-      this._reloadTimer = null
       this.listWidget = null
     },
 
@@ -179,12 +178,15 @@ Page(
     loadQueue(announcement, silent) {
       if (!this.state.alive || this.state.busy || typeof this.request !== 'function') return
       const generation = this._generation
+      const keepList = this.state.mode === 'queue' && this.state.items.length > 0
       this.state.busy = true
       this.state.mode = 'queue'
       this.state.query = ''
-      this.state.current = null
-      this.state.items = []
-      this.deleteList()
+      if (!keepList) {
+        this.state.current = null
+        this.state.items = []
+        this.deleteList()
+      }
       this.updateControls()
       this.updateVisibility(false)
       if (!silent) this.setStatus(announcement ? `${announcement} · Refreshing…` : 'Loading queue…', false)
@@ -334,11 +336,7 @@ Page(
             this.setStatus((response && response.error) || 'Could not add the song', true)
             return
           }
-          this.setStatus(`Added ${name} to the queue.`, false)
-          this._reloadTimer = setTimeout(() => {
-            this._reloadTimer = null
-            if (this.state.alive && generation === this._generation) this.loadQueue(`Added ${name}`)
-          }, 650)
+          this.loadQueue(`Added ${name}`)
         })
         .catch((error) => {
           if (!this.state.alive || generation !== this._generation) return
@@ -351,10 +349,6 @@ Page(
       this.state.alive = false
       this.closeKeyboard()
       this._generation = Number(this._generation || 0) + 1
-      if (this._reloadTimer) {
-        clearTimeout(this._reloadTimer)
-        this._reloadTimer = null
-      }
     },
   }),
 )

@@ -34,7 +34,8 @@
             "page/gt/tracks/index.page",
             "page/gt/search/index.page",
             "page/gt/queue/index.page",
-            "page/gt/cover/index.page"
+            "page/gt/cover/index.page",
+            "page/gt/radio/index.page"
           ]
         },
         "app-side": {

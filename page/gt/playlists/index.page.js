@@ -12,6 +12,7 @@ import {
   LIST_STYLE,
   SEARCH_BUTTON_STYLE,
   STATUS_STYLE,
+  REFRESH_STYLE,
 } from 'zosLoader:./index.page.[pf].layout.js'
 
 const FILTERS = [
@@ -41,6 +42,12 @@ Page(
       this.state.items = []
       this.state.visibleItems = []
       this._generation = Number(this._generation || 0) + 1
+      this._loadSequence = 0
+      this._loading = false
+      this._active = true
+      this._nextOffset = null
+      this._total = 0
+      this._warning = ''
       this.listWidget = null
     },
 
@@ -68,6 +75,10 @@ Page(
       this.statusWidget = hmUI.createWidget(hmUI.widget.TEXT, {
         ...STATUS_STYLE,
         text: 'Loading playlists...',
+      })
+      this.refreshWidget = hmUI.createWidget(hmUI.widget.BUTTON, {
+        ...REFRESH_STYLE,
+        click_func: () => this.load(this._failedOffset === undefined ? 0 : this._failedOffset, true),
       })
       this.updateFilterButtons()
 
@@ -163,25 +174,42 @@ Page(
       })
     },
 
-    load() {
+    load(offset = 0, refresh = false) {
+      if (!this.state.alive || this._loading || this.state.busy) return
       const generation = this._generation
-      this.request({ method: 'spotify.getPlaylists', params: {} })
+      const sequence = ++this._loadSequence
+      this._loading = true
+      if (offset === 0) this._forceRefresh = refresh
+      this.refreshWidget.setProperty(hmUI.prop.MORE, { ...REFRESH_STYLE, text: 'Loading…' })
+      this.request({ method: 'spotify.getPlaylists', params: { offset, refresh: this._forceRefresh } })
         .then((response) => {
-          if (!this.state.alive || generation !== this._generation) return
+          if (!this.state.alive || generation !== this._generation || sequence !== this._loadSequence) return
+          this._loading = false
           if (!response || response.success === false) {
-            this.setStatus((response && response.error) || 'Could not load playlists', true)
-            return
+            throw new Error((response && response.error) || 'Could not load playlists')
           }
-
-          this.state.items = response.items || []
-          if (!this.state.items.length) {
-            this.setStatus('No playlists found', false)
-            return
-          }
+          const existing = offset === 0 ? [] : this.state.items
+          const uris = {}
+          this.state.items = existing.concat(response.items || []).filter((item) => {
+            if (!item || !item.uri || uris[item.uri]) return false
+            uris[item.uri] = true
+            return true
+          })
+          this._failedOffset = undefined
+          this._total = response.total === undefined ? this.state.items.length : response.total
+          this._warning = response.warning || (offset === 0 ? '' : this._warning)
+          const next = response.nextOffset
+          this._nextOffset = Number.isFinite(next) && next > offset ? next : null
           this.applyFilters()
+          this.refreshWidget.setProperty(hmUI.prop.MORE, { ...REFRESH_STYLE, text: this._nextOffset === null ? 'Refresh playlists' : 'Loading more…' })
+          if (this._nextOffset !== null && this._active) this.load(this._nextOffset)
         })
         .catch((error) => {
-          if (this.state.alive && generation === this._generation) this.setStatus(error.message || error, true)
+          if (!this.state.alive || generation !== this._generation || sequence !== this._loadSequence) return
+          this._loading = false
+          this._failedOffset = offset
+          this.setStatus(error.message || error, !this.state.items.length)
+          this.refreshWidget.setProperty(hmUI.prop.MORE, { ...REFRESH_STYLE, text: this.state.items.length ? 'Retry remaining playlists' : 'Retry playlists' })
         })
     },
 
@@ -205,24 +233,26 @@ Page(
       if (!visible.length) {
         this.setStatus(query ? `No ${label.toLowerCase()} matches` : `No ${label.toLowerCase()} playlists`, false)
       } else {
-        this.setStatus(`${visible.length}/${this.state.items.length} · ${label}`, false)
+        this.setStatus(this._warning || `${visible.length}/${this._total} · ${label}${this._nextOffset !== null ? ' · Loading more…' : ''}`, false)
       }
       this.renderList(visible)
     },
 
     renderList(items) {
-      if (this.listWidget) {
-        try {
-          hmUI.deleteWidget(this.listWidget)
-        } catch (error) {}
-        this.listWidget = null
-      }
-      if (!items.length) return
-
       const data = items.map((item) => ({
         name: String(item.name || 'Untitled').substring(0, 40),
         subtitle: String(item.subtitle || 'Playlist').substring(0, 48),
       }))
+
+      if (this.listWidget) {
+        this.listWidget.setProperty(hmUI.prop.UPDATE_DATA, {
+          data_array: data, data_count: data.length, on_page: 1,
+          data_type_config: data.length ? [{ start: 0, end: data.length - 1, type_id: 1 }] : [],
+          data_type_config_count: data.length ? 1 : 0,
+        })
+        return
+      }
+      if (!items.length) return
 
       this.listWidget = hmUI.createWidget(hmUI.widget.SCROLL_LIST, {
         ...LIST_STYLE,
@@ -259,6 +289,8 @@ Page(
         item_config_count: 1,
         data_array: data,
         data_count: data.length,
+        data_type_config: [{ start: 0, end: data.length - 1, type_id: 1 }],
+        data_type_config_count: 1,
         enable_scroll_bar: true,
         item_click_func: (list, index) => this.playPlaylist(index),
       })
@@ -289,10 +321,18 @@ Page(
         })
     },
 
+    onPause() { this._active = false },
+
+    onResume() {
+      this._active = true
+      if (this._nextOffset !== null && this._failedOffset === undefined) this.load(this._nextOffset)
+    },
+
     onDestroy() {
       this.closeKeyboard()
       this.state.alive = false
       this._generation = Number(this._generation || 0) + 1
+      this._loadSequence += 1
     },
   }),
 )

@@ -57,5 +57,11 @@ export const LIST_STYLE = {
   x: px(14),
   y: px(75),
   w: W - px(28),
-  h: DEVICE_HEIGHT - px(87),
+  h: DEVICE_HEIGHT - px(143),
 }
+
+export const PREVIOUS_PAGE_STYLE = {
+  x: px(14), y: DEVICE_HEIGHT - px(58), w: Math.floor((W - px(36)) / 2), h: px(44),
+  text: 'Previous', radius: px(12), normal_color: 0x242424, press_color: 0x363636, color: 0xffffff, text_size: px(16),
+}
+export const NEXT_PAGE_STYLE = { ...PREVIOUS_PAGE_STYLE, x: Math.ceil((W + px(8)) / 2), text: 'Next songs' }

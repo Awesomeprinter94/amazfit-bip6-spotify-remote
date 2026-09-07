@@ -25,9 +25,10 @@ Spotify Remote is a Zepp OS mini app made for the Amazfit Bip 6. It connects to 
 | Playback | Play/pause and move to the previous or next track |
 | Liking | Like or unlike the current song directly from the Now Playing screen |
 | Album art | Tap the current cover to open it fullscreen |
-| Playlists | Browse up to 50 playlists, search locally, and filter by **All**, **Mine**, or **Spotify** |
-| Liked Songs | Browse up to 30 saved tracks with lightweight cover previews and start playback |
+| Playlists | Automatically load every playlist page returned by Spotify, search locally, and filter by **All**, **Mine**, or **Spotify** |
+| Liked Songs | Browse saved tracks in pages of 30, with covers for every song that has artwork |
 | Search | Search Spotify by song, artist, or album and play a result |
+| Radio | Start a song recommendation set, or choose an artist mix when recommendations are unavailable |
 | Queue | View the current queue, search for tracks, and add tracks or episodes |
 | Volume | Open the Bip 6 native Music controller to change the phone's media volume |
 
@@ -98,10 +99,32 @@ app.json    Zepp OS manifest
 - Artwork starts downloading with the playback-state request and is transferred at a lightweight watch-friendly size.
 - The app depends on the phone, Zepp background service, Spotify availability, and the permissions granted to the Spotify application.
 
+### Playlists and radio
+
+The playlist screen now follows Spotify's pagination instead of stopping at 50 entries. **Refresh playlists** fetches fresh data; if a later page fails, **Retry remaining playlists** keeps the entries already loaded. A profile lookup failure no longer blocks playlist browsing.
+
+Spotify's API returns playlists you own or follow. Private and collaborative playlists require the corresponding login permissions; playlist folders are not returned. The phone's Home recommendations are not the same collection as this library endpoint. See [Spotify's playlist API](https://developer.spotify.com/documentation/web-api/reference/get-a-list-of-current-users-playlists) and [playlist behavior and permissions](https://developer.spotify.com/documentation/web-api/concepts/playlists).
+
+Spotify restricts recommendations and algorithmic/editorial playlists for many development-mode apps. Loading all API pages cannot recover content the API withholds. See [Spotify's access restrictions](https://developer.spotify.com/blog/2024-11-27-changes-to-the-web-api).
+
+Tap **Radio** beside a Liked Songs or Search result, or on the home screen for the current song. **Start radio** requests recommendations seeded by that song and plays the resulting finite set. It does not reproduce Spotify's continuously generated native radio. If recommendations are unavailable, **Play artist mix** searches for playable songs by the seed song's artists and starts a clearly labeled mix. No playlist is created or saved.
+
+Liked Songs has **Previous** and **Next songs** buttons. All available covers on a page load with two requests at a time, prioritizing the focused row. Failed covers retry twice; tap the cover count to retry again.
+
+## Responsiveness
+
+- Play/pause updates immediately and sends an explicit command once playback state is known. Rapid taps are sent in order; failed commands restore the last confirmed state.
+- Controls refresh playback as soon as Spotify acknowledges them. The home screen checks for song changes every 5 seconds while playing and every 15 seconds while paused, with a local progress clock between checks. These timers stop when the page is hidden.
+- The phone starts artwork alongside the playback metadata reply, eliminating the usual separate cover request. Home uses the image nearest 64 px; larger images near 300 px are requested only when opening fullscreen. The small home cover can look softer. Both sizes come directly from Spotify and use [Zepp's image conversion](https://docs.zepp.com/docs/reference/side-service-api/image-convert/) before transfer.
+- Recent converted home/fullscreen covers use eight reusable phone cache slots, plus 30 slots for Liked Songs. Received covers are shared across watch pages and indexed in local storage for reuse after restarting. Missing files and overwritten slots are invalidated. The app skips obsolete artwork and cancels older transfers when supported.
+- Only the playback fields displayed by the watch cross the phone bridge. Playlists, Liked Songs, and search results are cached on the phone for 30 seconds; account changes invalidate that cache.
+
+Network and Bluetooth latency still affect command completion and new artwork. The tests check request ordering, caching, error recovery, and page lifecycle behavior; physical-device timings need to be measured on the paired watch and phone.
+
 ## Development notes
 
 - App ID: `26263`
-- App version: `1.6.0`
+- App version: `1.6.0` (build code `11`)
 - Design width: `390`
 - Target profile: `gt.s`
 - Runtime API: Zepp OS `4.0`

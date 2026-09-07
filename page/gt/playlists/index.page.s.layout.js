@@ -102,5 +102,10 @@ export const LIST_STYLE = {
   x: px(14),
   y: px(166),
   w: W - px(28),
-  h: DEVICE_HEIGHT - px(178),
+  h: DEVICE_HEIGHT - px(234),
+}
+
+export const REFRESH_STYLE = {
+  x: px(14), y: DEVICE_HEIGHT - px(58), w: W - px(28), h: px(44),
+  text: 'Refresh playlists', radius: px(12), normal_color: 0x242424, press_color: 0x363636, color: 0xffffff, text_size: px(16),
 }
