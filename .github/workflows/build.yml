@@ -1,0 +1,40 @@
+
+name: Build Amazfit Bip 6 App
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Get project files
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Zeus CLI
+        run: npm install -g @zeppos/zeus-cli
+
+      - name: Install project dependencies
+        run: npm install
+
+      - name: Run tests
+        run: npm test
+
+      - name: Build Amazfit app
+        run: npm run build
+
+      - name: Save ZAB package
+        uses: actions/upload-artifact@v4
+        with:
+          name: amazfit-bip6-app
+          path: dist/*.zab
+          if-no-files-found: error
